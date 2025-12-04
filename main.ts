@@ -1,5 +1,4 @@
-import { AwsClient } from "https://deno.land/x/aws4fetch@v1.4.4/mod.ts";
-
+import { AwsClient } from "npm:aws4fetch";
 export default {
   async fetch(request: Request): Promise<Response> {
     try {
