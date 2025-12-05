@@ -12,7 +12,7 @@ export default {
       const video = url.searchParams.get("video");
       const acc = url.searchParams.get("acc");
 
-      // Ping check (Cron-job အတွက်)
+      // Ping check
       if (video === "ping") return new Response("Pong!", { status: 200 });
 
       if (!video || !acc || !R2_ACCOUNTS[acc]) {
@@ -29,15 +29,12 @@ export default {
 
       const endpoint = `https://${creds.accountId}.r2.cloudflarestorage.com`;
       const bucket = creds.bucketName;
-      
-      // Path ပြင်ဆင်ခြင်း
       const objectPath = decodeURIComponent(video);
 
       // =========================================================
       // 🎥 PART A: M3U8 HANDLING (Dynamic Rewriter)
       // =========================================================
       if (objectPath.endsWith(".m3u8")) {
-        // Path Encoding
         const encodedPath = objectPath.split('/').map(encodeURIComponent).join('/');
         const m3u8Url = new URL(`${endpoint}/${bucket}/${encodedPath}`);
         
@@ -52,32 +49,25 @@ export default {
         if (!response.ok) return new Response("M3U8 Not Found", { status: 404 });
         
         const originalText = await response.text();
-        
-        // Base Directory
         const lastSlashIndex = objectPath.lastIndexOf("/");
         const baseDir = lastSlashIndex !== -1 ? objectPath.substring(0, lastSlashIndex + 1) : "";
 
-        // Rewrite Lines
         const lines = originalText.split("\n");
         const newLines = await Promise.all(lines.map(async (line) => {
           const trimmed = line.trim();
-          
           if (trimmed && !trimmed.startsWith("#") && (trimmed.endsWith(".ts") || trimmed.endsWith(".m4s") || trimmed.endsWith(".mp4"))) {
             let fullPath = trimmed;
             if (!trimmed.startsWith("http")) {
                 fullPath = baseDir + trimmed;
             }
-            
             const encodedFullPath = fullPath.split('/').map(encodeURIComponent).join('/');
             const tsUrl = new URL(`${endpoint}/${bucket}/${encodedFullPath}`);
-            
             const signedTs = await r2.sign(tsUrl, {
               method: "GET",
               aws: { signQuery: true },
               headers: { "Host": `${creds.accountId}.r2.cloudflarestorage.com` },
-              expiresIn: 14400 // 4 Hours Expiry
+              expiresIn: 14400 
             });
-            
             return signedTs.url;
           }
           return line;
@@ -93,7 +83,7 @@ export default {
       }
 
       // =========================================================
-      // 📦 PART B: MP4 HANDLING (Download & Size Fix)
+      // 📦 PART B: MP4 HANDLING (Size Fix Mode)
       // =========================================================
       const cleanFileName = objectPath.split('/').pop();
       const encodedFileName = encodeURIComponent(cleanFileName);
@@ -103,42 +93,44 @@ export default {
       const objectUrl = new URL(`${endpoint}/${bucket}/${encodedPath}`);
       const hostHeader = { "Host": `${creds.accountId}.r2.cloudflarestorage.com` };
       
-      // Force Download Name
+      // Force R2 to send Content-Disposition
       objectUrl.searchParams.set("response-content-disposition", contentDisposition);
 
-      // Sign URL
-      const signedUrl = await r2.sign(objectUrl, {
-        method: 'GET',
-        aws: { signQuery: true },
-        headers: hostHeader,
-        expiresIn: 14400 // 4 Hours
-      });
-
-      // 🔥 HEAD Request Logic (APK Size Fix)
+      // 🔥 HEAD REQUEST (APK Size Check)
       if (request.method === "HEAD") {
-        try {
-          const r2Response = await fetch(signedUrl.url, { method: "HEAD" });
-          if (r2Response.ok) {
-            const newHeaders = new Headers();
-            newHeaders.set("Access-Control-Allow-Origin", "*");
-            newHeaders.set("Access-Control-Allow-Methods", "GET, HEAD, OPTIONS");
-            newHeaders.set("Access-Control-Expose-Headers", "Content-Length, Content-Type, Content-Disposition, Accept-Ranges, ETag");
+        const signedHead = await r2.sign(objectUrl, {
+          method: "HEAD",
+          aws: { signQuery: true },
+          headers: hostHeader,
+          expiresIn: 3600
+        });
 
-            if (r2Response.headers.has("Content-Length")) {
-              newHeaders.set("Content-Length", r2Response.headers.get("Content-Length"));
-            }
-            newHeaders.set("Content-Type", r2Response.headers.get("Content-Type") || "video/mp4");
-            newHeaders.set("Content-Disposition", contentDisposition);
-            newHeaders.set("Accept-Ranges", "bytes");
+        // R2 ဆီက Header တွေကို တိုက်ရိုက်ယူမယ်
+        const r2Response = await fetch(signedHead.url, { method: "HEAD" });
+        
+        // Header တွေကို အကုန်ကူးယူမယ် (Copy All)
+        const newHeaders = new Headers(r2Response.headers);
+        
+        // APK မြင်အောင် ဖွင့်ပေးမယ်
+        newHeaders.set("Access-Control-Allow-Origin", "*");
+        newHeaders.set("Access-Control-Expose-Headers", "*"); // 🔥 Header အကုန်ပြမယ်
 
-            return new Response(null, { status: 200, headers: newHeaders });
-          }
-        } catch (e) {}
-        return Response.redirect(signedUrl.url, 302);
+        // 200 OK နဲ့ ပြန်ပို့မယ်
+        return new Response(null, {
+          status: 200, 
+          headers: newHeaders
+        });
       }
 
-      // ⬇️ GET Request (Redirect)
-      return Response.redirect(signedUrl.url, 302);
+      // ⬇️ GET REQUEST (Download Redirect)
+      const signedGet = await r2.sign(objectUrl, {
+        method: "GET",
+        aws: { signQuery: true },
+        headers: hostHeader,
+        expiresIn: 14400 
+      });
+
+      return Response.redirect(signedGet.url, 302);
 
     } catch (err: any) {
       return new Response(`Error: ${err.message}`, { status: 500 });
